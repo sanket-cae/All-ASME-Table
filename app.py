@@ -27,46 +27,64 @@ def load_data():
 try:
   db_as, db_y1, db_u, db_te, db_tcd, db_tm, db_map = load_data()
 
+
   # --- INDEPENDENT MASTER MATERIAL LIST POOLING ---
-  def extract_material_specs(df, spec_col):
+  def extract_material_specs(df, spec_col_candidates):
     if df is None or df.empty:
       return pd.DataFrame()
 
-    # Normalize column name variations if needed
-    cols = {spec_col: "Spec No.", "Type/Grade": "Type/Grade"}
-    # Locate alloy / UNS column dynamically
-    uns_cols = [c for c in df.columns if "UNS" in c or "Alloy" in c]
+    # Find the actual spec column name
+    df_cols_str = [str(c) for c in df.columns]
+    actual_spec_col = None
+    for cand in spec_col_candidates:
+      matches = [c for c in df.columns if cand.lower() in str(c).lower()]
+      if matches:
+        actual_spec_col = matches[0]
+        break
+
+    if not actual_spec_col:
+      return pd.DataFrame()
+
+    # Find alloy / UNS column safely by casting column names to string
+    uns_cols = [
+        c
+        for c in df.columns
+        if "uns" in str(c).lower() or "alloy" in str(c).lower()
+    ]
     uns_col_name = uns_cols[0] if uns_cols else None
 
+    cols_mapping = {actual_spec_col: "Spec No.", "Type/Grade": "Type/Grade"}
     sub_cols = ["Spec No.", "Type/Grade"]
+
     if uns_col_name:
-      cols[uns_col_name] = "UNS No."
+      cols_mapping[uns_col_name] = "UNS No."
       sub_cols.append("UNS No.")
 
-    temp_df = df.rename(columns=cols)
+    temp_df = df.rename(columns=cols_mapping)
     available_cols = [c for c in sub_cols if c in temp_df.columns]
     sub = temp_df[available_cols].copy()
 
     for c in available_cols:
       sub[c] = sub[c].fillna("").astype(str).str.strip()
+
+    # Filter out empty or NaN spec rows
+    sub = sub[
+        ~sub["Spec No."].isin(["", "nan", "None", "NaN", "NAT"])
+        & sub["Type/Grade"].ne("")
+        & sub["Type/Grade"].ne("nan")
+    ]
     return sub
 
 
-  # Extract keys from all three stress databases independently
-  master_as = extract_material_specs(
-      db_as, "Spec No." if "Spec No." in db_as.columns else "SpecNo."
-  )
-  master_y1 = extract_material_specs(
-      db_y1, "Spec No." if "Spec No." in db_y1.columns else "SpecNo."
-  )
-  master_u = extract_material_specs(
-      db_u, "Spec No." if "Spec No." in db_u.columns else "SpecNo."
-  )
+  # Extract records independently from all 3 stress sheets
+  master_as = extract_material_specs(db_as, ["Spec No.", "SpecNo."])
+  master_y1 = extract_material_specs(db_y1, ["Spec No.", "SpecNo."])
+  master_u = extract_material_specs(db_u, ["Spec No.", "SpecNo."])
 
-  # Combine and drop duplicates to make sure extra materials in DB_Y1/DB_U are not lost
+  # Combine and drop duplicates to account for extra materials in DB_Y1 / DB_U
   df_master = (
       pd.concat([master_as, master_y1, master_u])
-      .drop_duplicates()
+      .drop_duplicates(subset=["Spec No.", "Type/Grade"])
       .reset_index(drop=True)
   )
 
@@ -89,31 +107,29 @@ try:
       f"Selected Specification: **{selected_spec}** | Grade: **{selected_grade}**"
   )
 
-  # Filter underlying tables based on user choice
-  match_as = pd.DataFrame()
-  match_y1 = pd.DataFrame()
-  match_u = pd.DataFrame()
+  # Filter underlying tables based on user choice safely
+  def filter_table(df, spec_val, grade_val):
+    if df is None or df.empty:
+      return pd.DataFrame()
+    # Find matching spec column name
+    spec_col = next(
+        (c for c in df.columns if "spec" in str(c).lower()), df.columns[3]
+    )
+    if "Type/Grade" not in df.columns:
+      return pd.DataFrame()
 
-  if not db_as.empty:
-    spec_col_as = "Spec No." if "Spec No." in db_as.columns else "SpecNo."
-    match_as = db_as[
-        (db_as[spec_col_as].astype(str).str.strip() == str(selected_spec))
-        & (db_as["Type/Grade"].astype(str).str.strip() == str(selected_grade))
+    return df[
+        (df[spec_col].fillna("").astype(str).str.strip() == str(spec_val))
+        & (
+            df["Type/Grade"].fillna("").astype(str).str.strip()
+            == str(grade_val)
+        )
     ]
 
-  if not db_y1.empty:
-    spec_col_y1 = "Spec No." if "Spec No." in db_y1.columns else "SpecNo."
-    match_y1 = db_y1[
-        (db_y1[spec_col_y1].astype(str).str.strip() == str(selected_spec))
-        & (db_y1["Type/Grade"].astype(str).str.strip() == str(selected_grade))
-    ]
 
-  if not db_u.empty:
-    spec_col_u = "Spec No." if "Spec No." in db_u.columns else "SpecNo."
-    match_u = db_u[
-        (db_u[spec_col_u].astype(str).str.strip() == str(selected_spec))
-        & (db_u["Type/Grade"].astype(str).str.strip() == str(selected_grade))
-    ]
+  match_as = filter_table(db_as, selected_spec, selected_grade)
+  match_y1 = filter_table(db_y1, selected_spec, selected_grade)
+  match_u = filter_table(db_u, selected_spec, selected_grade)
 
   # Display data across tabs keeping original structure
   tab1, tab2, tab3 = st.tabs(
