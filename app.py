@@ -79,7 +79,7 @@ def load_data(file_path):
   db_map_raw.columns = db_map_raw.iloc[0]
   db_map = db_map_raw[1:].reset_index(drop=True)
 
-  # Normalize SpecNo. naming in DB_Y1 & DB_U if needed
+  # Normalize SpecNo. naming
   for df in [db_y1, db_u]:
     if "SpecNo." in df.columns and "Spec No." not in df.columns:
       df.rename(columns={"SpecNo.": "Spec No."}, inplace=True)
@@ -139,7 +139,6 @@ with st.sidebar.expander("1. Code & Material Selection", expanded=True):
   )
   db_column_name = code_section_map[selected_section_label]
 
-  # Independent Pooling across DB_AS, DB_Y1, and DB_U
   all_specs = sorted(
       list(
           set(
@@ -237,7 +236,7 @@ with st.sidebar.expander("1. Code & Material Selection", expanded=True):
                 .astype(str)
                 .str.strip()
                 .tolist()
-                + db_u[db_u["Type/Grade"].str.strip() == selected_grade][
+                + db_u[db_u["Spec No."].str.strip() == selected_grade][
                     "Spec No."
                 ]
                 .dropna()
@@ -282,8 +281,16 @@ if not db_map.empty:
       else db_map.columns[2]
   )
   map_grade_col = (
-      [c for c in db_map.columns if "Grade" in str(c) or "Type" in str(c)][0]
-      if [c for c in db_map.columns if "Grade" in str(c) or "Type" in str(c)]
+      [
+          c
+          for c in db_map.columns
+          if "Grade" in str(c) or "Type" in str(c)
+      ][0]
+      if [
+          c
+          for c in db_map.columns
+          if "Grade" in str(c) or "Type" in str(c)
+      ]
       else db_map.columns[3]
   )
 
@@ -316,7 +323,7 @@ if not db_map.empty:
         else 7850
     )
 
-# Variant Source Strategy across sheets
+# Variant Source Strategy across sheets (Prioritize DB_AS, fallback to DB_Y1, then DB_U)
 variant_df = db_as[
     (db_as["Spec No."].str.strip() == selected_spec)
     & (db_as["Type/Grade"].str.strip() == selected_grade)
@@ -348,7 +355,10 @@ if source_sheet_used == "DB_AS" and db_column_name in variant_df.columns:
 variant_df = variant_df.reset_index(drop=True)
 variant_df["Variant_No"] = variant_df.index + 1
 
-tensile_col_candidates = [c for c in variant_df.columns if "Tensile" in str(c)]
+# Extract Tensile column accurately across sheets
+tensile_col_candidates = [
+    c for c in variant_df.columns if "Tensile" in str(c)
+]
 tensile_col = tensile_col_candidates[0] if tensile_col_candidates else None
 
 with st.sidebar.expander("2. Variant & Initial Temp", expanded=True):
@@ -523,8 +533,24 @@ else:
     source = item["source"]
 
     db_col = code_section_map[section]
-    t_col_name = [c for c in record.index if "Tensile" in str(c)]
-    tensile = record.get(t_col_name[0], "-") if t_col_name else "-"
+
+    # Explicit Ultimate Tensile Strength lookup from DB_U or record
+    u_match = db_u[
+        (db_u["Spec No."].astype(str).str.strip() == str(spec).strip())
+        & (db_u["Type/Grade"].astype(str).str.strip() == str(grade).strip())
+    ]
+    if not u_match.empty:
+      u_t_candidates = [
+          c for c in u_match.columns if "Tensile" in str(c)
+      ]
+      tensile = (
+          u_match.iloc[0].get(u_t_candidates[0], "-")
+          if u_t_candidates
+          else "-"
+      )
+    else:
+      t_col_name = [c for c in record.index if "Tensile" in str(c)]
+      tensile = record.get(t_col_name[0], "-") if t_col_name else "-"
 
     card_label = (
         f"📦 [{idx+1}] **Spec:** {spec} | **Grade:** {grade} | **Variant:**"
@@ -625,298 +651,4 @@ else:
               if pd.notnull(matched_map.iloc[0].get("Poisson's\nRatio"))
               else 0.3
           )
-          density = (
-              float(matched_map.iloc[0].get("Density\nkg/m3", 7850))
-              if pd.notnull(matched_map.iloc[0].get("Density\nkg/m3"))
-              else 7850
-          )
-
-      r1_c1, r1_c2, r1_c3, r1_c4, r1_c5 = st.columns(5)
-      with r1_c1:
-        render_meta_item("Nominal Comp.", str(nom_comp))
-      with r1_c2:
-        render_meta_item("Product Form", str(prod_form))
-      with r1_c3:
-        render_meta_item("Class / Cond.", str(class_cond))
-      with r1_c4:
-        render_meta_item("Size / Thick.", str(size_thick))
-      with r1_c5:
-        render_meta_item(
-            "Min. Tensile",
-            (
-                f"{float(tensile):.3f} MPa"
-                if pd.notnull(tensile)
-                and str(tensile).replace(".", "", 1).isdigit()
-                else "-"
-            ),
-        )
-
-      r2_c1, r2_c2, r2_c3, r2_c4, r2_c5 = st.columns(5)
-      with r2_c1:
-        render_meta_item(
-            "Min. Yield",
-            (
-                f"{float(min_yield):.3f} MPa"
-                if pd.notnull(min_yield)
-                and str(min_yield).replace(".", "", 1).isdigit()
-                else "-"
-            ),
-        )
-      with r2_c2:
-        render_meta_item("Max Temp Limit", str(max_temp_limit))
-      with r2_c3:
-        render_meta_item("Ext. Chart No.", str(ext_chart))
-      with r2_c4:
-        render_meta_item(
-            "Property Groups",
-            f"TE: {te_group} | TCD: {tcd_group} | TM: {tm_group}",
-        )
-      with r2_c5:
-        render_meta_item("Notes", str(notes) if pd.notnull(notes) else "-")
-
-      st.markdown("---")
-
-      # --- DYNAMIC TEMPERATURE EVALUATION INPUT ---
-      st.markdown("#### 🎯 Evaluate at Additional Temperature(s)")
-      col_t1, col_t2 = st.columns([3, 1])
-      with col_t1:
-        new_temp_input = st.text_input(
-            "Enter Temperature(s) in °C (comma-separated)",
-            key=f"temp_input_{idx}",
-            placeholder="e.g. 150, 250, 350",
-        )
-      with col_t2:
-        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-        if st.button("Evaluate Temp", key=f"eval_btn_{idx}"):
-          try:
-            parsed_temps = [
-                float(t.strip())
-                for t in new_temp_input.split(",")
-                if t.strip().replace(".", "", 1).isdigit()
-            ]
-            for pt in parsed_temps:
-              if pt not in item["eval_temps"]:
-                item["eval_temps"].append(pt)
-            st.rerun()
-          except Exception:
-            st.error("Invalid temperature format.")
-
-      if not item.get("eval_temps"):
-        item["eval_temps"] = [20.0]
-
-      # Build Multi-Temperature Table across DB_AS, DB_Y1, DB_U
-      y1_row = db_y1[
-          (db_y1["Spec No."].astype(str).str.strip() == str(spec).strip())
-          & (db_y1["Type/Grade"].astype(str).str.strip() == str(grade).strip())
-      ]
-      as_row = db_as[
-          (db_as["Spec No."].astype(str).str.strip() == str(spec).strip())
-          & (db_as["Type/Grade"].astype(str).str.strip() == str(grade).strip())
-      ]
-      u_row = db_u[
-          (db_u["Spec No."].astype(str).str.strip() == str(spec).strip())
-          & (db_u["Type/Grade"].astype(str).str.strip() == str(grade).strip())
-      ]
-
-      multi_temp_records = []
-      for t in sorted(item["eval_temps"]):
-        if source == "DB_AS":
-          s_val = get_row_stress_at_temp(record, temp_cols, t)
-        else:
-          if not as_row.empty:
-            s_val = get_row_stress_at_temp(as_row.iloc[0], temp_cols, t)
-          else:
-            s_val = "N/A"
-
-        y_val = (
-            get_row_stress_at_temp(y1_row.iloc[0], temp_cols, t)
-            if not y1_row.empty
-            else "-"
-        )
-        u_val = (
-            get_row_stress_at_temp(u_row.iloc[0], temp_cols, t)
-            if not u_row.empty
-            else "-"
-        )
-
-        e_i = interpolate_prop(db_tm, "T (˚C)", "E", t, "TM GR.", tm_group)
-        tc_i = interpolate_prop(db_tcd, "T (˚C)", "TC", t, "TCD GR.", tcd_group)
-        td_i = interpolate_prop(db_tcd, "T (˚C)", "TD", t, "TCD GR.", tcd_group)
-        a_i = interpolate_prop(db_te, "T (˚C)", "A", t, "TE GROUP", te_group)
-        b_i = interpolate_prop(db_te, "T (˚C)", "B", t, "TE GROUP", te_group)
-
-        cp_i = "-"
-        try:
-          if (
-              isinstance(tc_i, (int, float))
-              and isinstance(td_i, (int, float))
-              and td_i > 0
-              and density
-          ):
-            cp_i = (tc_i * (10**6)) / (float(density) * td_i)
-        except Exception:
-          cp_i = "-"
-
-        multi_temp_records.append({
-            "Temp (°C)": t,
-            "Allowable Stress (MPa)": (
-                round(s_val, 3) if isinstance(s_val, (int, float)) else s_val
-            ),
-            "Yield Strength (MPa)": (
-                round(y_val, 3) if isinstance(y_val, (int, float)) else y_val
-            ),
-            "Tensile Strength (MPa)": (
-                round(u_val, 3) if isinstance(u_val, (int, float)) else u_val
-            ),
-            "Modulus E (GPa)": (
-                round(e_i, 3) if isinstance(e_i, (int, float)) else e_i
-            ),
-            "Poisson Ratio (–)": round(poisson, 3),
-            "Density (kg/m³)": round(density, 3),
-            "Thermal Cond. TC (W/m·°C)": (
-                round(tc_i, 3) if isinstance(tc_i, (int, float)) else tc_i
-            ),
-            "Thermal Diff. TD (10⁻⁶ m²/s)": (
-                round(td_i, 3) if isinstance(td_i, (int, float)) else td_i
-            ),
-            "Specific Heat Cp (J/kg·°C)": (
-                round(cp_i, 3) if isinstance(cp_i, (int, float)) else cp_i
-            ),
-            "Thermal Exp. A (mm/mm/°C)": (
-                f"{a_i:.3e}" if isinstance(a_i, (int, float)) else a_i
-            ),
-            "Thermal Exp. B (mm/mm/°C)": (
-                f"{b_i:.3e}" if isinstance(b_i, (int, float)) else b_i
-            ),
-        })
-
-      st.dataframe(pd.DataFrame(multi_temp_records), use_container_width=True)
-
-      # Sub-tabs for Full Breakdown and Trend
-      sub_tab1, sub_tab2 = st.tabs(
-          ["📑 Full Temperature Breakdown", "📈 Trend Graph"]
-      )
-
-      with sub_tab1:
-        if temp_cols:
-          stress_values = (
-              [record.get(t, "NP") for t in temp_cols]
-              if source == "DB_AS"
-              else ["-"] * len(temp_cols)
-          )
-          yield_values = [
-              y1_row.iloc[0].get(t, "-") if not y1_row.empty else "-"
-              for t in temp_cols
-          ]
-          tensile_values = [
-              u_row.iloc[0].get(t, "-") if not u_row.empty else "-"
-              for t in temp_cols
-          ]
-          te_a_v, te_b_v, tc_v, td_v, cp_v, e_v = [], [], [], [], [], []
-
-          for t_str in temp_cols:
-            try:
-              t_num = float(t_str)
-            except ValueError:
-              continue
-            a_v = interpolate_prop(
-                db_te, "T (˚C)", "A", t_num, "TE GROUP", te_group
-            )
-            b_v = interpolate_prop(
-                db_te, "T (˚C)", "B", t_num, "TE GROUP", te_group
-            )
-            te_a_v.append(
-                f"{a_v:.3e}" if isinstance(a_v, (int, float)) else a_v
-            )
-            te_b_v.append(
-                f"{b_v:.3e}" if isinstance(b_v, (int, float)) else b_v
-            )
-
-            tc_item = interpolate_prop(
-                db_tcd, "T (˚C)", "TC", t_num, "TCD GR.", tcd_group
-            )
-            td_item = interpolate_prop(
-                db_tcd, "T (˚C)", "TD", t_num, "TCD GR.", tcd_group
-            )
-            tc_v.append(
-                round(tc_item, 3) if isinstance(tc_item, (int, float)) else tc_item
-            )
-            td_v.append(
-                round(td_item, 3) if isinstance(td_item, (int, float)) else td_item
-            )
-
-            try:
-              if (
-                  isinstance(tc_item, (int, float))
-                  and isinstance(td_item, (int, float))
-                  and td_item > 0
-                  and density
-              ):
-                cp_v.append(
-                    round(
-                        (tc_item * (10**6)) / (float(density) * td_item), 3
-                    )
-                )
-              else:
-                cp_v.append("-")
-            except Exception:
-              cp_v.append("-")
-
-            e_item = interpolate_prop(
-                db_tm, "T (˚C)", "E", t_num, "TM GR.", tm_group
-            )
-            e_v.append(
-                round(e_item, 3) if isinstance(e_item, (int, float)) else e_item
-            )
-
-          valid_temp_cols = [
-              t
-              for t in temp_cols
-              if str(t).strip().replace(".", "", 1).isdigit()
-          ]
-          full_df = pd.DataFrame({
-              "Temp (°C)": valid_temp_cols[: len(e_v)],
-              "Allowable Stress (MPa)": stress_values[: len(e_v)],
-              "Yield Strength (MPa)": yield_values[: len(e_v)],
-              "Tensile Strength (MPa)": tensile_values[: len(e_v)],
-              "Modulus E (GPa)": e_v,
-              "Poisson Ratio (–)": round(poisson, 3),
-              "Density (kg/m³)": round(density, 3),
-              "Thermal Cond. TC (W/m·°C)": tc_v,
-              "Thermal Diff. TD (10⁻⁶ m²/s)": td_v,
-              "Specific Heat Cp (J/kg·°C)": cp_v,
-              "Thermal Exp. A (mm/mm/°C)": te_a_v,
-              "Thermal Exp. B (mm/mm/°C)": te_b_v,
-          })
-          st.dataframe(full_df, use_container_width=True, height=300)
-
-      with sub_tab2:
-        if temp_cols and "full_df" in locals() and not full_df.empty:
-          chart_metric = st.selectbox(
-              "Select Property to Plot:",
-              [
-                  "Allowable Stress (MPa)",
-                  "Yield Strength (MPa)",
-                  "Tensile Strength (MPa)",
-                  "Modulus E (GPa)",
-                  "Thermal Cond. TC (W/m·°C)",
-                  "Specific Heat Cp (J/kg·°C)",
-              ],
-              key=f"chart_{idx}",
-          )
-          plot_df = full_df[["Temp (°C)", chart_metric]].copy()
-          plot_df["Temp (°C)"] = pd.to_numeric(
-              plot_df["Temp (°C)"], errors="coerce"
-          )
-          plot_df[chart_metric] = pd.to_numeric(
-              plot_df[chart_metric], errors="coerce"
-          )
-          plot_df = plot_df.dropna().sort_values("Temp (°C)")
-
-          if not plot_df.empty:
-            st.line_chart(
-                plot_df.set_index("Temp (°C)")[chart_metric],
-                use_container_width=True,
-            )
-          else:
-            st.info("No numeric data available to plot.")
+ 
