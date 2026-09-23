@@ -64,47 +64,55 @@ st.markdown(
 )
 
 
-# Load Excel Database (Cleaning dates and ensuring string formats)
+# Load Excel Database with duplicate column handling
 @st.cache_data
 def load_data(file_path):
   xls = pd.ExcelFile(file_path)
-  db_as = pd.read_excel(file_path, sheet_name="DB_AS", dtype=str)
-  db_y1 = pd.read_excel(file_path, sheet_name="DB_Y1", dtype=str)
-  db_u = pd.read_excel(file_path, sheet_name="DB_U", dtype=str)
-  db_te = pd.read_excel(file_path, sheet_name="DB_TE", dtype=str)
-  db_tcd = pd.read_excel(file_path, sheet_name="DB_TCD", dtype=str)
-  db_tm = pd.read_excel(file_path, sheet_name="DB_TM", dtype=str)
+
+  def read_and_dedup(sheet):
+    df = pd.read_excel(file_path, sheet_name=sheet, dtype=str)
+    # Handle duplicate columns by appending suffix
+    cols = pd.Series(df.columns)
+    for dup in cols[cols.duplicated()].unique():
+      cols[cols == dup] = [
+          f"{dup}_{i}" if i != 0 else dup
+          for i in range(sum(cols == dup))
+      ]
+    df.columns = cols
+    return df
+
+  db_as = read_and_dedup("DB_AS")
+  db_y1 = read_and_dedup("DB_Y1")
+  db_u = read_and_dedup("DB_U")
+  db_te = read_and_dedup("DB_TE")
+  db_tcd = read_and_dedup("DB_TCD")
+  db_tm = read_and_dedup("DB_TM")
 
   db_map_raw = pd.read_excel(file_path, sheet_name="DB_MAP", dtype=str)
   db_map_raw.columns = db_map_raw.iloc[0]
   db_map = db_map_raw[1:].reset_index(drop=True)
 
-  # Normalize SpecNo. naming
+  # Normalize spec column names across DB_Y1 and DB_U
   for df in [db_y1, db_u]:
-    if "SpecNo." in df.columns and "Spec No." not in df.columns:
-      df.rename(columns={"SpecNo.": "Spec No."}, inplace=True)
+    for col in df.columns:
+      if "spec" in str(col).lower() and col != "Spec No.":
+        # Check if primary Spec No. exists
+        if "Spec No." not in df.columns:
+          df.rename(columns={col: "Spec No."}, inplace=True)
+          break
 
   for df in [db_as, db_y1, db_u, db_map]:
-    if "Type/Grade" in df.columns:
-      df["Type/Grade"] = df["Type/Grade"].apply(
-          lambda x: (
-              x.strftime("%b-%d").upper()
-              if isinstance(
-                  x, (datetime.datetime, datetime.date, pd.Timestamp)
-              )
-              else str(x).strip()
-          )
-      )
-    if "Type/\nGrade" in df.columns:
-      df["Type/\nGrade"] = df["Type/\nGrade"].apply(
-          lambda x: (
-              x.strftime("%b-%d").upper()
-              if isinstance(
-                  x, (datetime.datetime, datetime.date, pd.Timestamp)
-              )
-              else str(x).strip()
-          )
-      )
+    for col in df.columns:
+      if "type" in str(col).lower() or "grade" in str(col).lower():
+        df[col] = df[col].apply(
+            lambda x: (
+                x.strftime("%b-%d").upper()
+                if isinstance(
+                    x, (datetime.datetime, datetime.date, pd.Timestamp)
+                )
+                else str(x).strip()
+            )
+        )
 
   return db_as, db_y1, db_u, db_te, db_tcd, db_tm, db_map
 
@@ -139,159 +147,168 @@ with st.sidebar.expander("1. Code & Material Selection", expanded=True):
   )
   db_column_name = code_section_map[selected_section_label]
 
+  # Helper to safely get spec / grade series as 1D
+  def get_col_1d(df, keyword):
+    matches = [c for c in df.columns if keyword.lower() in str(c).lower()]
+    if matches:
+      s = df[matches[0]]
+      if isinstance(s, pd.DataFrame):
+        s = s.iloc[:, 0]
+      return s.dropna().astype(str).str.strip()
+    return pd.Series(dtype=str)
+
   all_specs = sorted(
       list(
           set(
-              [
-                  str(s).strip()
-                  for s in db_as["Spec No."].dropna().unique()
-                  if str(s).strip() not in ["nan", ""]
-              ]
-              + [
-                  str(s).strip()
-                  for s in db_y1["Spec No."].dropna().unique()
-                  if str(s).strip() not in ["nan", ""]
-              ]
-              + [
-                  str(s).strip()
-                  for s in db_u["Spec No."].dropna().unique()
-                  if str(s).strip() not in ["nan", ""]
-              ]
+              list(get_col_1d(db_as, "Spec No."))
+              + list(get_col_1d(db_y1, "Spec No."))
+              + list(get_col_1d(db_u, "Spec No."))
           )
       )
   )
+  all_specs = [s for s in all_specs if s and s.lower() not in ["nan", "none"]]
 
   all_grades = sorted(
       list(
           set(
-              [
-                  str(g).strip()
-                  for g in db_as["Type/Grade"].dropna().unique()
-                  if str(g).strip() not in ["nan", ""]
-              ]
-              + [
-                  str(g).strip()
-                  for g in db_y1["Type/Grade"].dropna().unique()
-                  if str(g).strip() not in ["nan", ""]
-              ]
-              + [
-                  str(g).strip()
-                  for g in db_u["Type/Grade"].dropna().unique()
-                  if str(g).strip() not in ["nan", ""]
-              ]
+              list(get_col_1d(db_as, "Type/Grade"))
+              + list(get_col_1d(db_y1, "Type/Grade"))
+              + list(get_col_1d(db_u, "Type/Grade"))
           )
       )
   )
+  all_grades = [g for g in all_grades if g and g.lower() not in ["nan", "none"]]
 
   search_mode = st.radio("Search Direction", ["By Spec No. first", "By Grade first"])
 
   if search_mode == "By Spec No. first":
-    selected_spec = st.selectbox("Specification Number (Spec No.)", all_specs)
+    selected_spec = st.selectbox(
+        "Specification Number (Spec No.)",
+        all_specs if all_specs else ["None"],
+    )
+    # Filter grades for this spec across all sheets
     spec_grades = sorted(
         list(
             set(
-                db_as[db_as["Spec No."].str.strip() == selected_spec][
-                    "Type/Grade"
-                ]
-                .dropna()
-                .astype(str)
-                .str.strip()
-                .tolist()
-                + db_y1[db_y1["Spec No."].str.strip() == selected_spec][
-                    "Type/Grade"
-                ]
-                .dropna()
-                .astype(str)
-                .str.strip()
-                .tolist()
-                + db_u[db_u["Spec No."].str.strip() == selected_spec][
-                    "Type/Grade"
-                ]
-                .dropna()
-                .astype(str)
-                .str.strip()
-                .tolist()
+                list(
+                    db_as[
+                        get_col_1d(db_as, "Spec No.") == selected_spec
+                    ].get("Type/Grade", pd.Series())
+                    if "Type/Grade" in db_as.columns
+                    else []
+                )
+                + list(
+                    db_y1[
+                        get_col_1d(db_y1, "Spec No.") == selected_spec
+                    ].get("Type/Grade", pd.Series())
+                    if "Type/Grade" in db_y1.columns
+                    else []
+                )
+                + list(
+                    db_u[get_col_1d(db_u, "Spec No.") == selected_spec].get(
+                        "Type/Grade", pd.Series()
+                    )
+                    if "Type/Grade" in db_u.columns
+                    else []
+                )
             )
         )
     )
+    spec_grades = [
+        str(g).strip()
+        for g in spec_grades
+        if pd.notnull(g) and str(g).strip().lower() not in ["nan", "none"]
+    ]
     selected_grade = st.selectbox(
         "Type / Grade", spec_grades if spec_grades else all_grades
     )
   else:
-    selected_grade = st.selectbox("Type / Grade", all_grades)
+    selected_grade = st.selectbox(
+        "Type / Grade", all_grades if all_grades else ["None"]
+    )
     grade_specs = sorted(
         list(
             set(
-                db_as[db_as["Type/Grade"].str.strip() == selected_grade][
-                    "Spec No."
-                ]
-                .dropna()
-                .astype(str)
-                .str.strip()
-                .tolist()
-                + db_y1[db_y1["Type/Grade"].str.strip() == selected_grade][
-                    "Spec No."
-                ]
-                .dropna()
-                .astype(str)
-                .str.strip()
-                .tolist()
-                + db_u[db_u["Spec No."].str.strip() == selected_grade][
-                    "Spec No."
-                ]
-                .dropna()
-                .astype(str)
-                .str.strip()
-                .tolist()
+                list(
+                    db_as[
+                        db_as.get("Type/Grade", pd.Series()).astype(str).str.strip()
+                        == selected_grade
+                    ].get("Spec No.", pd.Series())
+                )
+                + list(
+                    db_y1[
+                        db_y1.get("Type/Grade", pd.Series()).astype(str).str.strip()
+                        == selected_grade
+                    ].get("Spec No.", pd.Series())
+                )
+                + list(
+                    db_u[
+                        db_u.get("Type/Grade", pd.Series()).astype(str).str.strip()
+                        == selected_grade
+                    ].get("Spec No.", pd.Series())
+                )
             )
         )
     )
+    grade_specs = [
+        str(s).strip()
+        for s in grade_specs
+        if pd.notnull(s) and str(s).strip().lower() not in ["nan", "none"]
+    ]
     selected_spec = st.selectbox(
-        "Specification Number (Spec No.)", grade_specs if grade_specs else all_specs
+        "Specification Number (Spec No.)",
+        grade_specs if grade_specs else all_specs,
     )
 
+  # Find UNS / Alloy designation across combined DB
   combined_db = pd.concat([db_as, db_y1, db_u], ignore_index=True)
-  filtered_uns_df = combined_db[
-      (combined_db["Spec No."].str.strip() == selected_spec)
-      & (combined_db["Type/Grade"].str.strip() == selected_grade)
-  ]
-  uns_col = [
-      c
-      for c in filtered_uns_df.columns
-      if "Alloy" in str(c) or "UNS" in str(c)
-  ]
+  spec_col_match = next(
+      (c for c in combined_db.columns if "spec" in str(c).lower()), None
+  )
+  grade_col_match = next(
+      (c for c in combined_db.columns if "grade" in str(c).lower() or "type" in str(c).lower()), None
+  )
 
   filtered_uns = []
-  if uns_col:
-    filtered_uns = sorted(
-        [
-            str(u).strip()
-            for u in filtered_uns_df[uns_col[0]].dropna().unique()
-            if str(u).strip() not in ["nan", "…", ""]
-        ]
-    )
+  if spec_col_match and grade_col_match:
+    f_df = combined_db[
+        (combined_db[spec_col_match].astype(str).str.strip() == str(selected_spec))
+        & (combined_db[grade_col_match].astype(str).str.strip() == str(selected_grade))
+    ]
+    uns_col = [
+        c
+        for c in f_df.columns
+        if "alloy" in str(c).lower() or "uns" in str(c).lower()
+    ]
+    if uns_col:
+      filtered_uns = sorted(
+          list(
+              set(
+                  f_df[uns_col[0]]
+                  .dropna()
+                  .astype(str)
+                  .str.strip()
+                  .tolist()
+              )
+          )
+      )
+      filtered_uns = [
+          u
+          for u in filtered_uns
+          if u and u.lower() not in ["nan", "…", "", "none"]
+      ]
+
   selected_uns = st.selectbox("Alloy Designation / UNS No.", ["All"] + filtered_uns)
 
 # Pre-lookup fixed material constants
 sidebar_poisson, sidebar_density = 0.3, 7850.0
 if not db_map.empty:
-  map_spec_col = (
-      [c for c in db_map.columns if "Spec" in str(c)][0]
-      if [c for c in db_map.columns if "Spec" in str(c)]
-      else db_map.columns[2]
+  map_spec_col = next(
+      (c for c in db_map.columns if "spec" in str(c).lower()), db_map.columns[2]
   )
-  map_grade_col = (
-      [
-          c
-          for c in db_map.columns
-          if "Grade" in str(c) or "Type" in str(c)
-      ][0]
-      if [
-          c
-          for c in db_map.columns
-          if "Grade" in str(c) or "Type" in str(c)
-      ]
-      else db_map.columns[3]
+  map_grade_col = next(
+      (c for c in db_map.columns if "grade" in str(c).lower() or "type" in str(c).lower()),
+      db_map.columns[3],
   )
 
   matched_map_sb = pd.DataFrame()
@@ -312,36 +329,39 @@ if not db_map.empty:
         break
 
   if not matched_map_sb.empty:
-    sidebar_poisson = (
-        float(matched_map_sb.iloc[0].get("Poisson's\nRatio", 0.3))
-        if pd.notnull(matched_map_sb.iloc[0].get("Poisson's\nRatio"))
-        else 0.3
+    p_col = next(
+        (c for c in matched_map_sb.columns if "poisson" in str(c).lower()), None
     )
-    sidebar_density = (
-        float(matched_map_sb.iloc[0].get("Density\nkg/m3", 7850))
-        if pd.notnull(matched_map_sb.iloc[0].get("Density\nkg/m3"))
-        else 7850
+    d_col = next(
+        (c for c in matched_map_sb.columns if "density" in str(c).lower()), None
     )
+    if p_col and pd.notnull(matched_map_sb.iloc[0][p_col]):
+      sidebar_poisson = float(matched_map_sb.iloc[0][p_col])
+    if d_col and pd.notnull(matched_map_sb.iloc[0][d_col]):
+      sidebar_density = float(matched_map_sb.iloc[0][d_col])
 
-# Variant Source Strategy across sheets (Prioritize DB_AS, fallback to DB_Y1, then DB_U)
-variant_df = db_as[
-    (db_as["Spec No."].str.strip() == selected_spec)
-    & (db_as["Type/Grade"].str.strip() == selected_grade)
-].copy()
+# Variant source strategy across sheets (Prioritize DB_AS, fallback to DB_Y1, then DB_U)
+def get_variant_subset(df):
+  if df.empty:
+    return df
+  s_c = next((c for c in df.columns if "spec" in str(c).lower()), None)
+  g_c = next((c for c in df.columns if "grade" in str(c).lower() or "type" in str(c).lower()), None)
+  if not s_c or not g_c:
+    return pd.DataFrame()
+  return df[
+      (df[s_c].astype(str).str.strip() == str(selected_spec))
+      & (df[g_c].astype(str).str.strip() == str(selected_grade))
+  ].copy()
+
+variant_df = get_variant_subset(db_as)
 source_sheet_used = "DB_AS"
 
 if variant_df.empty:
-  variant_df = db_y1[
-      (db_y1["Spec No."].str.strip() == selected_spec)
-      & (db_y1["Type/Grade"].str.strip() == selected_grade)
-  ].copy()
+  variant_df = get_variant_subset(db_y1)
   source_sheet_used = "DB_Y1"
 
 if variant_df.empty:
-  variant_df = db_u[
-      (db_u["Spec No."].str.strip() == selected_spec)
-      & (db_u["Type/Grade"].str.strip() == selected_grade)
-  ].copy()
+  variant_df = get_variant_subset(db_u)
   source_sheet_used = "DB_U"
 
 if selected_uns != "All" and uns_col:
@@ -349,15 +369,14 @@ if selected_uns != "All" and uns_col:
 
 if source_sheet_used == "DB_AS" and db_column_name in variant_df.columns:
   variant_df = variant_df[
-      variant_df[db_column_name].str.strip().str.upper() != "NP"
+      variant_df[db_column_name].astype(str).str.strip().str.upper() != "NP"
   ]
 
 variant_df = variant_df.reset_index(drop=True)
 variant_df["Variant_No"] = variant_df.index + 1
 
-# Extract Tensile column accurately across sheets
 tensile_col_candidates = [
-    c for c in variant_df.columns if "Tensile" in str(c)
+    c for c in variant_df.columns if "tensile" in str(c).lower()
 ]
 tensile_col = tensile_col_candidates[0] if tensile_col_candidates else None
 
@@ -402,22 +421,6 @@ st.sidebar.markdown(
     </div>""",
     unsafe_allow_html=True,
 )
-
-st.sidebar.markdown("### 📥 Database Export")
-try:
-  with open(excel_file, "rb") as f:
-    excel_bytes = f.read()
-  st.sidebar.download_button(
-      label="Download Master Excel File",
-      data=excel_bytes,
-      file_name="ASME SecII Part D.xlsx",
-      mime=(
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-      ),
-      use_container_width=True,
-  )
-except Exception as e:
-  pass
 
 
 # --- ROBUST INTERPOLATION HELPERS ---
@@ -534,14 +537,14 @@ else:
 
     db_col = code_section_map[section]
 
-    # Explicit Ultimate Tensile Strength lookup from DB_U or record
+    # Explicit Ultimate Tensile Strength lookup from DB_U
     u_match = db_u[
-        (db_u["Spec No."].astype(str).str.strip() == str(spec).strip())
-        & (db_u["Type/Grade"].astype(str).str.strip() == str(grade).strip())
+        (db_u.get("Spec No.", pd.Series()).astype(str).str.strip() == str(spec).strip())
+        & (db_u.get("Type/Grade", pd.Series()).astype(str).str.strip() == str(grade).strip())
     ]
     if not u_match.empty:
       u_t_candidates = [
-          c for c in u_match.columns if "Tensile" in str(c)
+          c for c in u_match.columns if "tensile" in str(c).lower()
       ]
       tensile = (
           u_match.iloc[0].get(u_t_candidates[0], "-")
@@ -549,7 +552,7 @@ else:
           else "-"
       )
     else:
-      t_col_name = [c for c in record.index if "Tensile" in str(c)]
+      t_col_name = [c for c in record.index if "tensile" in str(c).lower()]
       tensile = record.get(t_col_name[0], "-") if t_col_name else "-"
 
     card_label = (
@@ -559,27 +562,19 @@ else:
     )
 
     with st.expander(card_label, expanded=(idx == 0)):
-      nom_comp = (
-          record.get([c for c in record.index if "Nominal" in str(c)][0], "-")
-          if [c for c in record.index if "Nominal" in str(c)]
-          else "-"
+      nom_comp = record.get(
+          next((c for c in record.index if "nominal" in str(c).lower()), "-"), "-"
       )
-      prod_form = (
-          record.get([c for c in record.index if "Product" in str(c)][0], "-")
-          if [c for c in record.index if "Product" in str(c)]
-          else "-"
+      prod_form = record.get(
+          next((c for c in record.index if "product" in str(c).lower()), "-"), "-"
       )
-      class_cond = (
-          record.get([c for c in record.index if "Class" in str(c)][0], "-")
-          if [c for c in record.index if "Class" in str(c)]
-          else "-"
+      class_cond = record.get(
+          next((c for c in record.index if "class" in str(c).lower()), "-"), "-"
       )
-      size_thick = (
-          record.get([c for c in record.index if "Size" in str(c)][0], "-")
-          if [c for c in record.index if "Size" in str(c)]
-          else "-"
+      size_thick = record.get(
+          next((c for c in record.index if "size" in str(c).lower()), "-"), "-"
       )
-      y_col_name = [c for c in record.index if "Yield" in str(c)]
+      y_col_name = [c for c in record.index if "yield" in str(c).lower()]
       min_yield = record.get(y_col_name[0], "-") if y_col_name else "-"
 
       raw_temp_limit = record.get(db_col, "NP") if source == "DB_AS" else "-"
@@ -590,44 +585,21 @@ else:
           else str(raw_temp_limit)
       )
 
-      ext_chart = (
-          record.get([c for c in record.index if "Ext" in str(c)][0], "-")
-          if [c for c in record.index if "Ext" in str(c)]
-          else "-"
+      ext_chart = record.get(
+          next((c for c in record.index if "ext" in str(c).lower()), "-"), "-"
       )
-      notes = (
-          record.get([c for c in record.index if "Note" in str(c)][0], "-")
-          if [c for c in record.index if "Note" in str(c)]
-          else "-"
+      notes = record.get(
+          next((c for c in record.index if "note" in str(c).lower()), "-"), "-"
       )
 
       te_group, tcd_group, tm_group, poisson, density = (
           "Group 1",
           "Group A",
           "C<=0.3%",
-          0.3,
-          7850,
+          sidebar_poisson,
+          sidebar_density,
       )
       if not db_map.empty:
-        map_spec_col = (
-            [c for c in db_map.columns if "Spec" in str(c)][0]
-            if [c for c in db_map.columns if "Spec" in str(c)]
-            else db_map.columns[2]
-        )
-        map_grade_col = (
-            [
-                c
-                for c in db_map.columns
-                if "Grade" in str(c) or "Type" in str(c)
-            ][0]
-            if [
-                c
-                for c in db_map.columns
-                if "Grade" in str(c) or "Type" in str(c)
-            ]
-            else db_map.columns[3]
-        )
-
         matched_map = pd.DataFrame()
         for _, m_row in db_map.iterrows():
           m_spec = str(m_row.get(map_spec_col, "")).strip()
@@ -646,9 +618,291 @@ else:
           te_group = matched_map.iloc[0].get("Table TE Group", "Group 1")
           tcd_group = matched_map.iloc[0].get("Table TCD Group", "Group A")
           tm_group = matched_map.iloc[0].get("Table TM Group", "C<=0.3%")
-          poisson = (
-              float(matched_map.iloc[0].get("Poisson's\nRatio", 0.3))
-              if pd.notnull(matched_map.iloc[0].get("Poisson's\nRatio"))
-              else 0.3
+
+      r1_c1, r1_c2, r1_c3, r1_c4, r1_c5 = st.columns(5)
+      with r1_c1:
+        render_meta_item("Nominal Comp.", str(nom_comp))
+      with r1_c2:
+        render_meta_item("Product Form", str(prod_form))
+      with r1_c3:
+        render_meta_item("Class / Cond.", str(class_cond))
+      with r1_c4:
+        render_meta_item("Size / Thick.", str(size_thick))
+      with r1_c5:
+        render_meta_item(
+            "Min. Tensile (Ultimate)",
+            (
+                f"{float(tensile):.3f} MPa"
+                if pd.notnull(tensile)
+                and str(tensile).replace(".", "", 1).isdigit()
+                else str(tensile)
+            ),
+        )
+
+      r2_c1, r2_c2, r2_c3, r2_c4, r2_c5 = st.columns(5)
+      with r2_c1:
+        render_meta_item(
+            "Min. Yield",
+            (
+                f"{float(min_yield):.3f} MPa"
+                if pd.notnull(min_yield)
+                and str(min_yield).replace(".", "", 1).isdigit()
+                else "-"
+            ),
+        )
+      with r2_c2:
+        render_meta_item("Max Temp Limit", str(max_temp_limit))
+      with r2_c3:
+        render_meta_item("Ext. Chart No.", str(ext_chart))
+      with r2_c4:
+        render_meta_item(
+            "Property Groups",
+            f"TE: {te_group} | TCD: {tcd_group} | TM: {tm_group}",
+        )
+      with r2_c5:
+        render_meta_item("Notes", str(notes) if pd.notnull(notes) else "-")
+
+      st.markdown("---")
+
+      # --- DYNAMIC TEMPERATURE EVALUATION INPUT ---
+      st.markdown("#### 🎯 Evaluate at Additional Temperature(s)")
+      col_t1, col_t2 = st.columns([3, 1])
+      with col_t1:
+        new_temp_input = st.text_input(
+            "Enter Temperature(s) in °C (comma-separated)",
+            key=f"temp_input_{idx}",
+            placeholder="e.g. 150, 250, 350",
+        )
+      with col_t2:
+        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+        if st.button("Evaluate Temp", key=f"eval_btn_{idx}"):
+          try:
+            parsed_temps = [
+                float(t.strip())
+                for t in new_temp_input.split(",")
+                if t.strip().replace(".", "", 1).isdigit()
+            ]
+            for pt in parsed_temps:
+              if pt not in item["eval_temps"]:
+                item["eval_temps"].append(pt)
+            st.rerun()
+          except Exception:
+            st.error("Invalid temperature format.")
+
+      if not item.get("eval_temps"):
+        item["eval_temps"] = [20.0]
+
+      y1_row = db_y1[
+          (db_y1.get("Spec No.", pd.Series()).astype(str).str.strip() == str(spec).strip())
+          & (db_y1.get("Type/Grade", pd.Series()).astype(str).str.strip() == str(grade).strip())
+      ]
+      as_row = db_as[
+          (db_as.get("Spec No.", pd.Series()).astype(str).str.strip() == str(spec).strip())
+          & (db_as.get("Type/Grade", pd.Series()).astype(str).str.strip() == str(grade).strip())
+      ]
+      u_row = db_u[
+          (db_u.get("Spec No.", pd.Series()).astype(str).str.strip() == str(spec).strip())
+          & (db_u.get("Type/Grade", pd.Series()).astype(str).str.strip() == str(grade).strip())
+      ]
+
+      multi_temp_records = []
+      for t in sorted(item["eval_temps"]):
+        if source == "DB_AS":
+          s_val = get_row_stress_at_temp(record, temp_cols, t)
+        else:
+          if not as_row.empty:
+            s_val = get_row_stress_at_temp(as_row.iloc[0], temp_cols, t)
+          else:
+            s_val = "N/A"
+
+        y_val = (
+            get_row_stress_at_temp(y1_row.iloc[0], temp_cols, t)
+            if not y1_row.empty
+            else "-"
+        )
+        u_val = (
+            get_row_stress_at_temp(u_row.iloc[0], temp_cols, t)
+            if not u_row.empty
+            else "-"
+        )
+
+        e_i = interpolate_prop(db_tm, "T (˚C)", "E", t, "TM GR.", tm_group)
+        tc_i = interpolate_prop(db_tcd, "T (˚C)", "TC", t, "TCD GR.", tcd_group)
+        td_i = interpolate_prop(db_tcd, "T (˚C)", "TD", t, "TCD GR.", tcd_group)
+        a_i = interpolate_prop(db_te, "T (˚C)", "A", t, "TE GROUP", te_group)
+        b_i = interpolate_prop(db_te, "T (˚C)", "B", t, "TE GROUP", te_group)
+
+        cp_i = "-"
+        try:
+          if (
+              isinstance(tc_i, (int, float))
+              and isinstance(td_i, (int, float))
+              and td_i > 0
+              and density
+          ):
+            cp_i = (tc_i * (10**6)) / (float(density) * td_i)
+        except Exception:
+          cp_i = "-"
+
+        multi_temp_records.append({
+            "Temp (°C)": t,
+            "Allowable Stress (MPa)": (
+                round(s_val, 3) if isinstance(s_val, (int, float)) else s_val
+            ),
+            "Yield Strength (MPa)": (
+                round(y_val, 3) if isinstance(y_val, (int, float)) else y_val
+            ),
+            "Ultimate Tensile Strength (MPa)": (
+                round(u_val, 3) if isinstance(u_val, (int, float)) else u_val
+            ),
+            "Modulus E (GPa)": (
+                round(e_i, 3) if isinstance(e_i, (int, float)) else e_i
+            ),
+            "Poisson Ratio (–)": round(poisson, 3),
+            "Density (kg/m³)": round(density, 3),
+            "Thermal Cond. TC (W/m·°C)": (
+                round(tc_i, 3) if isinstance(tc_i, (int, float)) else tc_i
+            ),
+            "Thermal Diff. TD (10⁻⁶ m²/s)": (
+                round(td_i, 3) if isinstance(td_i, (int, float)) else td_i
+            ),
+            "Specific Heat Cp (J/kg·°C)": (
+                round(cp_i, 3) if isinstance(cp_i, (int, float)) else cp_i
+            ),
+            "Thermal Exp. A (mm/mm/°C)": (
+                f"{a_i:.3e}" if isinstance(a_i, (int, float)) else a_i
+            ),
+            "Thermal Exp. B (mm/mm/°C)": (
+                f"{b_i:.3e}" if isinstance(b_i, (int, float)) else b_i
+            ),
+        })
+
+      st.dataframe(pd.DataFrame(multi_temp_records), use_container_width=True)
+
+      sub_tab1, sub_tab2 = st.tabs(
+          ["📑 Full Temperature Breakdown", "📈 Trend Graph"]
+      )
+
+      with sub_tab1:
+        if temp_cols:
+          stress_values = (
+              [record.get(t, "NP") for t in temp_cols]
+              if source == "DB_AS"
+              else ["-"] * len(temp_cols)
           )
- 
+          yield_values = [
+              y1_row.iloc[0].get(t, "-") if not y1_row.empty else "-"
+              for t in temp_cols
+          ]
+          tensile_values = [
+              u_row.iloc[0].get(t, "-") if not u_row.empty else "-"
+              for t in temp_cols
+          ]
+          te_a_v, te_b_v, tc_v, td_v, cp_v, e_v = [], [], [], [], [], []
+
+          for t_str in temp_cols:
+            try:
+              t_num = float(t_str)
+            except ValueError:
+              continue
+            a_v = interpolate_prop(
+                db_te, "T (˚C)", "A", t_num, "TE GROUP", te_group
+            )
+            b_v = interpolate_prop(
+                db_te, "T (˚C)", "B", t_num, "TE GROUP", te_group
+            )
+            te_a_v.append(
+                f"{a_v:.3e}" if isinstance(a_v, (int, float)) else a_v
+            )
+            te_b_v.append(
+                f"{b_v:.3e}" if isinstance(b_v, (int, float)) else b_v
+            )
+
+            tc_item = interpolate_prop(
+                db_tcd, "T (˚C)", "TC", t_num, "TCD GR.", tcd_group
+            )
+            td_item = interpolate_prop(
+                db_tcd, "T (˚C)", "TD", t_num, "TCD GR.", tcd_group
+            )
+            tc_v.append(
+                round(tc_item, 3) if isinstance(tc_item, (int, float)) else tc_item
+            )
+            td_v.append(
+                round(td_item, 3) if isinstance(td_item, (int, float)) else td_item
+            )
+
+            try:
+              if (
+                  isinstance(tc_item, (int, float))
+                  and isinstance(td_item, (int, float))
+                  and td_item > 0
+                  and density
+              ):
+                cp_v.append(
+                    round(
+                        (tc_item * (10**6)) / (float(density) * td_item), 3
+                    )
+                )
+              else:
+                cp_v.append("-")
+            except Exception:
+              cp_v.append("-")
+
+            e_item = interpolate_prop(
+                db_tm, "T (˚C)", "E", t_num, "TM GR.", tm_group
+            )
+            e_v.append(
+                round(e_item, 3) if isinstance(e_item, (int, float)) else e_item
+            )
+
+          valid_temp_cols = [
+              t
+              for t in temp_cols
+              if str(t).strip().replace(".", "", 1).isdigit()
+          ]
+          full_df = pd.DataFrame({
+              "Temp (°C)": valid_temp_cols[: len(e_v)],
+              "Allowable Stress (MPa)": stress_values[: len(e_v)],
+              "Yield Strength (MPa)": yield_values[: len(e_v)],
+              "Ultimate Tensile Strength (MPa)": tensile_values[: len(e_v)],
+              "Modulus E (GPa)": e_v,
+              "Poisson Ratio (–)": round(poisson, 3),
+              "Density (kg/m³)": round(density, 3),
+              "Thermal Cond. TC (W/m·°C)": tc_v,
+              "Thermal Diff. TD (10⁻⁶ m²/s)": td_v,
+              "Specific Heat Cp (J/kg·°C)": cp_v,
+              "Thermal Exp. A (mm/mm/°C)": te_a_v,
+              "Thermal Exp. B (mm/mm/°C)": te_b_v,
+          })
+          st.dataframe(full_df, use_container_width=True, height=300)
+
+      with sub_tab2:
+        if temp_cols and "full_df" in locals() and not full_df.empty:
+          chart_metric = st.selectbox(
+              "Select Property to Plot:",
+              [
+                  "Allowable Stress (MPa)",
+                  "Yield Strength (MPa)",
+                  "Ultimate Tensile Strength (MPa)",
+                  "Modulus E (GPa)",
+                  "Thermal Cond. TC (W/m·°C)",
+                  "Specific Heat Cp (J/kg·°C)",
+              ],
+              key=f"chart_{idx}",
+          )
+          plot_df = full_df[["Temp (°C)", chart_metric]].copy()
+          plot_df["Temp (°C)"] = pd.to_numeric(
+              plot_df["Temp (°C)"], errors="coerce"
+          )
+          plot_df[chart_metric] = pd.to_numeric(
+              plot_df[chart_metric], errors="coerce"
+          )
+          plot_df = plot_df.dropna().sort_values("Temp (°C)")
+
+          if not plot_df.empty:
+            st.line_chart(
+                plot_df.set_index("Temp (°C)")[chart_metric],
+                use_container_width=True,
+            )
+          else:
+            st.info("No numeric data available to plot.")
