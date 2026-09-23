@@ -71,7 +71,6 @@ def load_data(file_path):
 
   def read_and_dedup(sheet):
     df = pd.read_excel(file_path, sheet_name=sheet, dtype=str)
-    # Handle duplicate columns by appending suffix
     cols = pd.Series(df.columns)
     for dup in cols[cols.duplicated()].unique():
       cols[cols == dup] = [
@@ -92,27 +91,17 @@ def load_data(file_path):
   db_map_raw.columns = db_map_raw.iloc[0]
   db_map = db_map_raw[1:].reset_index(drop=True)
 
-  # Normalize spec column names across DB_Y1 and DB_U
+  # Normalize spec column name
   for df in [db_y1, db_u]:
     for col in df.columns:
-      if "spec" in str(col).lower() and col != "Spec No.":
-        # Check if primary Spec No. exists
+      if "spec" in str(col).lower() and "no" in str(col).lower():
         if "Spec No." not in df.columns:
           df.rename(columns={col: "Spec No."}, inplace=True)
           break
 
-  for df in [db_as, db_y1, db_u, db_map]:
-    for col in df.columns:
-      if "type" in str(col).lower() or "grade" in str(col).lower():
-        df[col] = df[col].apply(
-            lambda x: (
-                x.strftime("%b-%d").upper()
-                if isinstance(
-                    x, (datetime.datetime, datetime.date, pd.Timestamp)
-                )
-                else str(x).strip()
-            )
-        )
+  for df in [db_as, db_y1, db_u]:
+    if "SpecNo." in df.columns and "Spec No." not in df.columns:
+      df.rename(columns={"SpecNo.": "Spec No."}, inplace=True)
 
   return db_as, db_y1, db_u, db_te, db_tcd, db_tm, db_map
 
@@ -131,6 +120,44 @@ except Exception as e:
 if "history" not in st.session_state:
   st.session_state.history = []
 
+# --- SAFE COLUMN FINDERS & EXTRACTORS ---
+def get_spec_col(df):
+  for c in df.columns:
+    if "spec" in str(c).lower() and "no" in str(c).lower():
+      return c
+  return None
+
+
+def get_grade_col(df):
+  for c in df.columns:
+    if "grade" in str(c).lower() or "type" in str(c).lower():
+      return c
+  return None
+
+
+spec_col_as = get_spec_col(db_as)
+grade_col_as = get_grade_col(db_as)
+spec_col_y1 = get_spec_col(db_y1)
+grade_col_y1 = get_grade_col(db_y1)
+spec_col_u = get_spec_col(db_u)
+grade_col_u = get_grade_col(db_u)
+
+
+def get_unique_list(df, col):
+  if df is None or not col or col not in df.columns:
+    return []
+  s = df[col]
+  if isinstance(s, pd.DataFrame):
+    s = s.iloc[:, 0]
+  return sorted(
+      [
+          str(x).strip()
+          for x in s.dropna().unique()
+          if str(x).strip().lower() not in ["nan", "none", ""]
+      ]
+  )
+
+
 # --- SIDEBAR INPUTS (BIDIRECTIONAL SEARCH ACROSS ALL SHEETS) ---
 st.sidebar.markdown("### 🎛️ Configuration Panel")
 
@@ -147,37 +174,25 @@ with st.sidebar.expander("1. Code & Material Selection", expanded=True):
   )
   db_column_name = code_section_map[selected_section_label]
 
-  # Helper to safely get spec / grade series as 1D
-  def get_col_1d(df, keyword):
-    matches = [c for c in df.columns if keyword.lower() in str(c).lower()]
-    if matches:
-      s = df[matches[0]]
-      if isinstance(s, pd.DataFrame):
-        s = s.iloc[:, 0]
-      return s.dropna().astype(str).str.strip()
-    return pd.Series(dtype=str)
-
   all_specs = sorted(
       list(
           set(
-              list(get_col_1d(db_as, "Spec No."))
-              + list(get_col_1d(db_y1, "Spec No."))
-              + list(get_col_1d(db_u, "Spec No."))
+              get_unique_list(db_as, spec_col_as)
+              + get_unique_list(db_y1, spec_col_y1)
+              + get_unique_list(db_u, spec_col_u)
           )
       )
   )
-  all_specs = [s for s in all_specs if s and s.lower() not in ["nan", "none"]]
 
   all_grades = sorted(
       list(
           set(
-              list(get_col_1d(db_as, "Type/Grade"))
-              + list(get_col_1d(db_y1, "Type/Grade"))
-              + list(get_col_1d(db_u, "Type/Grade"))
+              get_unique_list(db_as, grade_col_as)
+              + get_unique_list(db_y1, grade_col_y1)
+              + get_unique_list(db_u, grade_col_u)
           )
       )
   )
-  all_grades = [g for g in all_grades if g and g.lower() not in ["nan", "none"]]
 
   search_mode = st.radio("Search Direction", ["By Spec No. first", "By Grade first"])
 
@@ -186,39 +201,23 @@ with st.sidebar.expander("1. Code & Material Selection", expanded=True):
         "Specification Number (Spec No.)",
         all_specs if all_specs else ["None"],
     )
-    # Filter grades for this spec across all sheets
+
+    # Get grades matching this spec safely across sheets
+    def filter_grades_for_spec(df, s_c, g_c, spec):
+      if df is None or not s_c or not g_c:
+        return []
+      sub = df[df[s_c].astype(str).str.strip() == spec]
+      return get_unique_list(sub, g_c)
+
     spec_grades = sorted(
         list(
             set(
-                list(
-                    db_as[
-                        get_col_1d(db_as, "Spec No.") == selected_spec
-                    ].get("Type/Grade", pd.Series())
-                    if "Type/Grade" in db_as.columns
-                    else []
-                )
-                + list(
-                    db_y1[
-                        get_col_1d(db_y1, "Spec No.") == selected_spec
-                    ].get("Type/Grade", pd.Series())
-                    if "Type/Grade" in db_y1.columns
-                    else []
-                )
-                + list(
-                    db_u[get_col_1d(db_u, "Spec No.") == selected_spec].get(
-                        "Type/Grade", pd.Series()
-                    )
-                    if "Type/Grade" in db_u.columns
-                    else []
-                )
+                filter_grades_for_spec(db_as, spec_col_as, grade_col_as, selected_spec)
+                + filter_grades_for_spec(db_y1, spec_col_y1, grade_col_y1, selected_spec)
+                + filter_grades_for_spec(db_u, spec_col_u, grade_col_u, selected_spec)
             )
         )
     )
-    spec_grades = [
-        str(g).strip()
-        for g in spec_grades
-        if pd.notnull(g) and str(g).strip().lower() not in ["nan", "none"]
-    ]
     selected_grade = st.selectbox(
         "Type / Grade", spec_grades if spec_grades else all_grades
     )
@@ -226,54 +225,37 @@ with st.sidebar.expander("1. Code & Material Selection", expanded=True):
     selected_grade = st.selectbox(
         "Type / Grade", all_grades if all_grades else ["None"]
     )
+
+    def filter_specs_for_grade(df, s_c, g_c, grade):
+      if df is None or not s_c or not g_c:
+        return []
+      sub = df[df[g_c].astype(str).str.strip() == grade]
+      return get_unique_list(sub, s_c)
+
     grade_specs = sorted(
         list(
             set(
-                list(
-                    db_as[
-                        db_as.get("Type/Grade", pd.Series()).astype(str).str.strip()
-                        == selected_grade
-                    ].get("Spec No.", pd.Series())
-                )
-                + list(
-                    db_y1[
-                        db_y1.get("Type/Grade", pd.Series()).astype(str).str.strip()
-                        == selected_grade
-                    ].get("Spec No.", pd.Series())
-                )
-                + list(
-                    db_u[
-                        db_u.get("Type/Grade", pd.Series()).astype(str).str.strip()
-                        == selected_grade
-                    ].get("Spec No.", pd.Series())
-                )
+                filter_specs_for_grade(db_as, spec_col_as, grade_col_as, selected_grade)
+                + filter_specs_for_grade(db_y1, spec_col_y1, grade_col_y1, selected_grade)
+                + filter_specs_for_grade(db_u, spec_col_u, grade_col_u, selected_grade)
             )
         )
     )
-    grade_specs = [
-        str(s).strip()
-        for s in grade_specs
-        if pd.notnull(s) and str(s).strip().lower() not in ["nan", "none"]
-    ]
     selected_spec = st.selectbox(
         "Specification Number (Spec No.)",
         grade_specs if grade_specs else all_specs,
     )
 
-  # Find UNS / Alloy designation across combined DB
+  # Find UNS / Alloy designation across combined DB safely
   combined_db = pd.concat([db_as, db_y1, db_u], ignore_index=True)
-  spec_col_match = next(
-      (c for c in combined_db.columns if "spec" in str(c).lower()), None
-  )
-  grade_col_match = next(
-      (c for c in combined_db.columns if "grade" in str(c).lower() or "type" in str(c).lower()), None
-  )
+  c_s_col = get_spec_col(combined_db)
+  c_g_col = get_grade_col(combined_db)
 
   filtered_uns = []
-  if spec_col_match and grade_col_match:
+  if c_s_col and c_g_col:
     f_df = combined_db[
-        (combined_db[spec_col_match].astype(str).str.strip() == str(selected_spec))
-        & (combined_db[grade_col_match].astype(str).str.strip() == str(selected_grade))
+        (combined_db[c_s_col].astype(str).str.strip() == str(selected_spec))
+        & (combined_db[c_g_col].astype(str).str.strip() == str(selected_grade))
     ]
     uns_col = [
         c
@@ -281,17 +263,7 @@ with st.sidebar.expander("1. Code & Material Selection", expanded=True):
         if "alloy" in str(c).lower() or "uns" in str(c).lower()
     ]
     if uns_col:
-      filtered_uns = sorted(
-          list(
-              set(
-                  f_df[uns_col[0]]
-                  .dropna()
-                  .astype(str)
-                  .str.strip()
-                  .tolist()
-              )
-          )
-      )
+      filtered_uns = get_unique_list(f_df, uns_col[0])
       filtered_uns = [
           u
           for u in filtered_uns
@@ -303,13 +275,8 @@ with st.sidebar.expander("1. Code & Material Selection", expanded=True):
 # Pre-lookup fixed material constants
 sidebar_poisson, sidebar_density = 0.3, 7850.0
 if not db_map.empty:
-  map_spec_col = next(
-      (c for c in db_map.columns if "spec" in str(c).lower()), db_map.columns[2]
-  )
-  map_grade_col = next(
-      (c for c in db_map.columns if "grade" in str(c).lower() or "type" in str(c).lower()),
-      db_map.columns[3],
-  )
+  map_spec_col = get_spec_col(db_map) or db_map.columns[2]
+  map_grade_col = get_grade_col(db_map) or db_map.columns[3]
 
   matched_map_sb = pd.DataFrame()
   for _, m_row in db_map.iterrows():
@@ -340,28 +307,26 @@ if not db_map.empty:
     if d_col and pd.notnull(matched_map_sb.iloc[0][d_col]):
       sidebar_density = float(matched_map_sb.iloc[0][d_col])
 
-# Variant source strategy across sheets (Prioritize DB_AS, fallback to DB_Y1, then DB_U)
-def get_variant_subset(df):
-  if df.empty:
-    return df
-  s_c = next((c for c in df.columns if "spec" in str(c).lower()), None)
-  g_c = next((c for c in df.columns if "grade" in str(c).lower() or "type" in str(c).lower()), None)
-  if not s_c or not g_c:
-    return pd.DataFrame()
-  return df[
-      (df[s_c].astype(str).str.strip() == str(selected_spec))
-      & (df[g_c].astype(str).str.strip() == str(selected_grade))
-  ].copy()
 
-variant_df = get_variant_subset(db_as)
+# Safe variant extractor function
+def get_variant_subset(df, s_c, g_c):
+  if df is None or df.empty or not s_c or not g_c:
+    return pd.DataFrame()
+  mask = (df[s_c].astype(str).str.strip() == str(selected_spec)) & (
+      df[g_c].astype(str).str.strip() == str(selected_grade)
+  )
+  return df[mask].copy()
+
+
+variant_df = get_variant_subset(db_as, spec_col_as, grade_col_as)
 source_sheet_used = "DB_AS"
 
 if variant_df.empty:
-  variant_df = get_variant_subset(db_y1)
+  variant_df = get_variant_subset(db_y1, spec_col_y1, grade_col_y1)
   source_sheet_used = "DB_Y1"
 
 if variant_df.empty:
-  variant_df = get_variant_subset(db_u)
+  variant_df = get_variant_subset(db_u, spec_col_u, grade_col_u)
   source_sheet_used = "DB_U"
 
 if selected_uns != "All" and uns_col:
@@ -538,10 +503,7 @@ else:
     db_col = code_section_map[section]
 
     # Explicit Ultimate Tensile Strength lookup from DB_U
-    u_match = db_u[
-        (db_u.get("Spec No.", pd.Series()).astype(str).str.strip() == str(spec).strip())
-        & (db_u.get("Type/Grade", pd.Series()).astype(str).str.strip() == str(grade).strip())
-    ]
+    u_match = get_variant_subset(db_u, spec_col_u, grade_col_u)
     if not u_match.empty:
       u_t_candidates = [
           c for c in u_match.columns if "tensile" in str(c).lower()
@@ -692,18 +654,9 @@ else:
       if not item.get("eval_temps"):
         item["eval_temps"] = [20.0]
 
-      y1_row = db_y1[
-          (db_y1.get("Spec No.", pd.Series()).astype(str).str.strip() == str(spec).strip())
-          & (db_y1.get("Type/Grade", pd.Series()).astype(str).str.strip() == str(grade).strip())
-      ]
-      as_row = db_as[
-          (db_as.get("Spec No.", pd.Series()).astype(str).str.strip() == str(spec).strip())
-          & (db_as.get("Type/Grade", pd.Series()).astype(str).str.strip() == str(grade).strip())
-      ]
-      u_row = db_u[
-          (db_u.get("Spec No.", pd.Series()).astype(str).str.strip() == str(spec).strip())
-          & (db_u.get("Type/Grade", pd.Series()).astype(str).str.strip() == str(grade).strip())
-      ]
+      y1_row = get_variant_subset(db_y1, spec_col_y1, grade_col_y1)
+      as_row = get_variant_subset(db_as, spec_col_as, grade_col_as)
+      u_row = get_variant_subset(db_u, spec_col_u, grade_col_u)
 
       multi_temp_records = []
       for t in sorted(item["eval_temps"]):
